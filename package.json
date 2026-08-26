@@ -1,0 +1,17 @@
+{
+  "name": "sera-fx-rates",
+  "version": "0.1.0",
+  "description": "An honest FX rates layer over Sera's on-chain orderbook. Serves per-direction rates resolved empirically from the live book, and returns null with a reason rather than a rate nobody can fill.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": { ".": "./src/index.js" },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "dev": "node src/server.js",
+    "smoke": "node src/server.js --once --currencies USD,SGD"
+  },
+  "engines": { "node": ">=18" },
+  "keywords": ["sera", "stablecoin", "fx", "exchange-rates", "orderbook", "built-on-sera"],
+  "license": "MIT",
+  "files": ["src", "README.md", "LICENSE"]
+}

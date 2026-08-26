@@ -1,0 +1,14 @@
+{
+  "uuid": "6498323162963866758821997363768081021934087225276209830156963470423288270848",
+  "route_params": {
+    "taker": "0x0000000000000000000000000000000000000001",
+    "inputToken": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "outputToken": "0x70e8de73ce538da2beed35d14187f6959a8eca96",
+    "maxInputAmount": "10000000",
+    "minOutputAmount": "11372535",
+    "recipient": "0x0000000000000000000000000000000000000001",
+    "deadline": 1787488263
+  },
+  "fee_breakdown": { "gas_cost_usd": "1.00", "gas_cost_from_token": "1.00" },
+  "route_metadata": { "leg_count": 1 }
+}

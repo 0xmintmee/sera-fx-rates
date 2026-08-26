@@ -1,0 +1,5 @@
+{ "markets": [
+  { "symbol": "XSGD/USDC", "base_symbol": "XSGD", "quote_symbol": "USDC" },
+  { "symbol": "EURC/USDC", "base_symbol": "EURC", "quote_symbol": "USDC" },
+  { "symbol": "EUR0/USDC", "base_symbol": "EUR0", "quote_symbol": "USDC" }
+] }

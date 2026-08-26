@@ -1,0 +1,17 @@
+name = "sera-fx-rates"
+main = "src/worker.js"
+compatibility_date = "2026-01-01"
+
+# The table is measured on a schedule and cached, never rebuilt per request.
+[triggers]
+crons = ["17 * * * *"]
+
+[vars]
+HUB = "USDC"
+STALE_AFTER_SECONDS = "900"
+DELAY_MS = "120"
+
+# Create with: wrangler kv namespace create RATES
+# [[kv_namespaces]]
+# binding = "RATES"
+# id = "<your namespace id>"
