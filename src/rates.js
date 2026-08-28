@@ -17,18 +17,18 @@
  *      confidently on exactly the thinnest pairs. Every rate here is stored and
  *      served for one direction only.
  *
- *   3. A RATE WITHOUT A SIZE IS NOT A RATE, and the venue says so itself. Measured
- *      live on 26 Aug 2026, one pair, one minute:
- *
- *          send $1      guaranteed 0 MYRT          rate undefined
- *          send $10     guaranteed 35.617832       3.5618
- *          send $100    guaranteed 398.038805      3.9804
- *          send $1,000  guaranteed 4,022.248526    4.0222
- *          send $10,000 guaranteed 40,264.345735   4.0264
- *
- *      A flat $1.00 gas plus a 0.14% fee makes the all-in cost a curve, so the $10
- *      sender is 11.5% worse off than the $10,000 sender on the same pair at the
- *      same instant. Every rate here carries the size it was measured at.
+ *   3. A RATE IS MEASURED WITH gas_mode 'pay_more', NOT THE API DEFAULT.
+ *      This one is a correction. The API defaults to 'receive_less', which
+ *      deducts the flat gas cost from the OUTPUT. Measured that way USDC->MYRT
+ *      looks like it prices worse the smaller you go -- 0 at $1, 3.5486 at $10,
+ *      3.9672 at $100 -- and it is tempting to call that a size penalty.
+ *      It is not. Send gas_mode 'pay_more' and the same book quotes 4.013693 at
+ *      $1, 4.013695 at $10 and 4.013695 at $100: the same rate to six figures
+ *      across two orders of magnitude. The curve was the fixed cost being netted
+ *      out of the output, exactly as documented, not the price moving.
+ *      Measured 28 Aug 2026. Rates here are measured with 'pay_more' so the
+ *      number means the price; the flat cost is reported separately, because a
+ *      caller needs both and should never see them blended into one figure.
  *
  * When the book will not price something, this layer returns null and says why.
  * Never a fallback, never a last known value, never an inverted guess.
@@ -78,19 +78,20 @@ export function counterpartsOf(markets, hub) {
  * Measure one direction. Climbs the ladder and stops at the first size that
  * prices, because the question is the entry size, not the depth.
  *
- * A 200 IS NOT A PRICE. Verified against the live API on 26 Aug 2026: every pair
- * that has a route at all returns HTTP 200 at $1 with `minOutputAmount: "0"` --
- * a fully formed route, a signed permit, a deadline, a leg count, and a
- * guarantee of nothing. The flat $1.00 gas consumes the entire notional at that
- * size, so the floor lands on zero. USDC->MYRT, USDC->XSGD and USDC->USDT all
- * did it, and sending a slippage parameter (in any of four spellings) changed
- * nothing, so it is the venue's answer rather than a missing argument.
+ * A ZERO FLOOR IS NOT A PRICE, and it is not a fault either. Under gas_mode
+ * 'receive_less' a $1 swap returns HTTP 200 with `minOutputAmount: "0"`: the
+ * flat gas equals the notional, so nothing is left to guarantee. That is honest
+ * arithmetic, disclosed in fee_breakdown before anything is signed, and it goes
+ * away entirely under 'pay_more', which is what this layer sends.
  *
- * Serving that through as `rate: 0` is worse than serving null: a caller that
- * checks for a number gets one, and a caller that checks truthiness silently
- * falls back. So a non-positive floor is treated as unpriced AT THAT SIZE and
- * the ladder keeps climbing -- which is correct, because the same pair prices
- * normally one rung up.
+ * The guard stays because a caller may override gasMode, and serving `rate: 0`
+ * would be worse than serving null: a caller that checks for a number gets one,
+ * and a caller that checks truthiness silently falls back. So a non-positive
+ * floor is treated as unpriced AT THAT SIZE and the ladder keeps climbing.
+ *
+ * I originally read that zero as the venue penalising small senders and said so
+ * publicly. It was a parameter I had not read. Kept here as the reason the
+ * default is 'pay_more'.
  */
 export async function measure(from, to, { ladder = DEFAULT_LADDER, delayMs = 120, ...opts } = {}) {
   let routedButEmpty = false;
@@ -125,12 +126,11 @@ export async function measure(from, to, { ladder = DEFAULT_LADDER, delayMs = 120
     if (delayMs) await sleep(delayMs);
   }
   if (rungs.length) {
-    // THE WHOLE LADDER IS THE ANSWER, not the first rung that happened to price.
-    // Stopping at the first one was the original design and it is wrong for the
-    // same reason a bare percentage is wrong: on 26 Aug 2026 USDC->MYRT paid
-    // 3.5618 at $10 and 4.0264 at $10,000, so serving the $10 rung as "the rate"
-    // understates a $1,000 transfer by 11.5%. Callers get the curve, and
-    // lookup()/convert() pick the rung that actually applies to their size.
+    // The whole ladder is still measured and served. Under 'pay_more' the rungs
+    // agree to six figures, which is the point: a caller can SEE that the price
+    // does not move with size rather than taking it on trust. Under a caller's
+    // own 'receive_less' the rungs differ by the fixed cost, and lookup()/
+    // convert() then pick the rung that applies to their amount.
     const first = rungs[0];
     return {
       quoted: true,

@@ -13,43 +13,51 @@ That is the transport problem, and it is the easy half. The hard half is decidin
 rate *means* when the book behind it is thin, one-directional, and spread across ten
 tokens per currency. This repo is an answer to that, not to the plumbing.
 
-## A 200 is not a price
+## The correction that shaped this repo
 
-The finding that shaped everything else here, measured live on **26 August 2026**:
+I published a finding that the flat gas cost made Sera price worse for small
+senders. **That was wrong, and it was wrong because of a parameter I had not
+read.**
 
-```
-POST /api/v1/swap/quote     USDC -> MYRT, from_amount = 1 USDC
+`POST /swap/quote` takes `gas_mode`, documented at
+[docs.sera.cx/swaps](https://docs.sera.cx/swaps/). It defaults to
+`receive_less`, which deducts the flat gas from your **output**. Measured that
+way, the same book looks like it prices worse the smaller you go:
 
-HTTP 200
-route_params.maxInputAmount   "1000000"
-route_params.minOutputAmount  "0"          <-- a successful quote for nothing
-route_metadata.leg_count      1
-fee_breakdown.gas_cost_usd    "1.00"
-```
+| you send | gas_mode | you receive | implied rate |
+|---|---|---|---|
+| $1 | `receive_less` | 0 MYRT | — |
+| $10 | `receive_less` | 35.485784 | 3.5486 |
+| $100 | `receive_less` | 396.718309 | 3.9672 |
 
-A full route, a deadline, a permit, a leg count — and a guaranteed output of zero. The
-flat $1.00 gas consumes the entire notional at that size, so the floor lands on nothing.
-It is not an error and it is not a missing parameter: the same quote re-sent with a
-slippage tolerance in four spellings (`slippage_bps`, `slippage`, `max_slippage_bps`,
-`slippage_tolerance`) returns byte-identical bodies.
+Send `pay_more` instead — the flat cost is added to your input rather than taken
+out of your output — and the same book, in the same minute, answers:
 
-Climb the ladder on that one pair, inside a single minute:
+| you want | gas_mode | you send up to | rate you get |
+|---|---|---|---|
+| $1 | `pay_more` | 2 USDC | **4.013693** |
+| $10 | `pay_more` | 11 USDC | **4.013695** |
+| $100 | `pay_more` | 101 USDC | **4.013695** |
 
-| you send | you are guaranteed | implied rate |
-|---|---|---|
-| $1 | 0 MYRT | undefined |
-| $10 | 35.617832 | 3.5618 |
-| $100 | 398.038805 | 3.9804 |
-| $1,000 | 4,022.248526 | 4.0222 |
-| $10,000 | 40,264.345735 | 4.0264 |
+**The same rate to six figures across two orders of magnitude.** There is no size
+penalty. The curve I measured was a fixed cost being netted out of the output,
+exactly as the docs say it will be — not the price moving.
 
-The $10 sender gets a rate **11.5% worse** than the $10,000 sender, on the same pair at the
-same instant. `USDC -> XSGD` and `USDC -> USDT` behave identically: nothing at $1, a real
-number above it.
+Measured live on 28 August 2026. `USDC -> XSGD` behaves identically: 1.265798 at
+$1, 1.265799 at $100.
 
-Anything that reads HTTP 200 as "priced" serves `rate: 0` on every corridor that works.
-This repo did exactly that on its first live run — see [What the live run
-found](#what-the-live-run-found).
+Two things follow, and they are why this layer exists:
+
+- **Gas is real on any chain, and Sera prices it into the quote before you sign.**
+  `fee_breakdown` itemises it, and you never need to hold ETH. A rail that shows
+  you the fixed component is doing something most of the industry does not.
+- **A rate and a cost are different numbers and must never be served blended.**
+  This layer measures with `pay_more` so the rate means the price, and reports
+  the flat cost separately, because a caller needs both.
+
+The general lesson, which I have now paid for three times: **a repeatable,
+consistent wrong number is evidence of a systematic input error before it is
+evidence of a broken system.**
 
 ## Three rules, each one a measurement rather than a preference
 
@@ -165,14 +173,17 @@ ladder keeps climbing, and a pair that routes-but-guarantees-nothing at every ru
 including a fixture that returns HTTP 200 with a zero floor — the old fixture returned a
 400 there, which is precisely why the bug survived.
 
-The live run forced a second, larger change. The resolver originally stopped at the first
-rung that priced and served that as *the* rate, which after the fix meant serving the $10
-rung. But USD to MYR pays 3.5618 at $10 and 4.0222 at $1,000 — so "stop at the first
-price" would have understated a $1,000 transfer by 11.4%, in a repo whose entire argument
-is that a rate without a size is not a rate. `measure()` now walks the whole ladder and
-stores the curve, and `lookup`/`convert` pick the rung that applies to the caller's
-amount. **A design can be self-refuting in a way tests do not catch; only real numbers
-show it.**
+Then a third pass found the real mistake, and it was not in the code. Every measurement
+above had been taken without `gas_mode`, so the API applied its documented default and
+netted the flat cost out of the output. I read the resulting curve as the venue pricing
+small transfers worse, and published that. It is not what the numbers say — see [the
+correction](#the-correction-that-shaped-this-repo) at the top. `measure()` still walks the
+whole ladder, because a caller should be able to *see* that the rate holds across sizes
+rather than trust me about it, but it now measures with `pay_more` by default.
+
+**Read the request schema before you interpret the response.** Two rounds of careful
+work on top of one unread parameter produced a confident, reproducible, wrong conclusion,
+and reproducibility made it feel more true rather than less.
 
 Reproducing a live run is awkward and the reason is the same wall that makes this layer
 necessary: `api.sera.cx` sends **no** `access-control-allow-origin` header, on any

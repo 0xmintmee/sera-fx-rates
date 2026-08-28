@@ -62,10 +62,18 @@ export async function fetchMarkets(opts = {}) {
  * rather than thrown. Everything else that fails throws, so a broken deploy can
  * never be read as an empty book.
  */
+export const DEFAULT_GAS_MODE = 'pay_more';
+
 export async function fetchQuote({ fromToken, toToken, fromAmountRaw }, opts = {}) {
   const base = opts.base || DEFAULT_BASE;
   const fetchImpl = opts.fetchImpl || fetch;
   const now = opts.now ? opts.now() : Date.now();
+  // gas_mode is documented at docs.sera.cx/swaps and it is NOT optional detail.
+  // 'receive_less' (the API default) deducts the flat gas from the output;
+  // 'pay_more' adds it to the input. Measuring a RATE means pay_more, because
+  // receive_less mixes the price with a fixed cost and makes the rate look
+  // size-dependent when it is not. See the README for what that cost me.
+  const gasMode = opts.gasMode || DEFAULT_GAS_MODE;
 
   const res = await fetchImpl(`${base}/swap/quote`, {
     method: 'POST',
@@ -77,6 +85,7 @@ export async function fetchQuote({ fromToken, toToken, fromAmountRaw }, opts = {
       owner_address: PROBE_ADDRESS,
       recipient: PROBE_ADDRESS,
       expiration: Math.floor(now / 1000) + 3600,
+      gas_mode: gasMode,
     }),
   });
 
