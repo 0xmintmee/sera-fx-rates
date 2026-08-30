@@ -1,30 +1,26 @@
 # sera-fx-rates
 
-**An FX rates layer over Sera's on-chain book that returns `null` when the book
-won't price, instead of a rate nobody can fill.**
+**A server-side FX rates layer over Sera's public, keyless quote endpoint. It measures
+rates instead of assuming them, and serves the rate and the cost as two separate numbers.**
 
-Sera's [FREE-FX-Rates](https://github.com/sera-cx/FREE-FX-Rates-by-Sera.CX) ships with
-`LIVE_RATES_ENABLED = false`, a `topOfBook` whose body returns `null` with a TODO, and a
-`loadRatesFromSera` that is commented out. Two functions and a flag. The repo's own notes
-explain why the flag is off: the core API is a signed on-chain orderbook with no CORS, so
-a server-side layer has to exist before a browser can read a rate at all.
+Sera lists a full rates engine on its own public roadmap under the name `sera-fx-rates`.
+This repo is a community implementation of the same idea, built in the open against the
+public endpoints, and offered to whoever ships the official one.
 
-That is the transport problem, and it is the easy half. The hard half is deciding what a
-rate *means* when the book behind it is thin, one-directional, and spread across ten
-tokens per currency. This repo is an answer to that, not to the plumbing.
+Everything here runs with no API key and no funded wallet, because
+`POST /swap/quote`, `GET /tokens` and `GET /markets` are all public.
 
 ## The correction that shaped this repo
 
-I published a finding that the flat gas cost made Sera price worse for small
-senders. **That was wrong, and it was wrong because of a parameter I had not
-read.**
+I published a finding that the flat gas cost made Sera price differently for small
+senders. **That was wrong, and it was wrong because of a parameter I had not read.**
 
 `POST /swap/quote` takes `gas_mode`, documented at
 [docs.sera.cx/swaps](https://docs.sera.cx/swaps/). It defaults to
 `receive_less`, which deducts the flat gas from your **output**. Measured that
-way, the same book looks like it prices worse the smaller you go:
+way, the ratio of output to input changes with size:
 
-| you send | gas_mode | you receive | implied rate |
+| you send | gas_mode | you receive | output ÷ input |
 |---|---|---|---|
 | $1 | `receive_less` | 0 MYRT | — |
 | $10 | `receive_less` | 35.485784 | 3.5486 |
@@ -40,7 +36,7 @@ out of your output — and the same book, in the same minute, answers:
 | $100 | `pay_more` | 101 USDC | **4.013695** |
 
 **The same rate to six figures across two orders of magnitude.** There is no size
-penalty. The curve I measured was a fixed cost being netted out of the output,
+penalty. The curve in the first table is a fixed cost being netted out of the output,
 exactly as the docs say it will be — not the price moving.
 
 Measured live on 28 August 2026. `USDC -> XSGD` behaves identically: 1.265798 at
@@ -55,49 +51,55 @@ Two things follow, and they are why this layer exists:
   This layer measures with `pay_more` so the rate means the price, and reports
   the flat cost separately, because a caller needs both.
 
-The general lesson, which I have now paid for three times: **a repeatable,
-consistent wrong number is evidence of a systematic input error before it is
-evidence of a broken system.**
+The general lesson, which I have now paid for three times: **read the request schema
+before you interpret the response.** A repeatable, consistent wrong number is evidence
+of a systematic input error before it is evidence of anything else.
 
 ## Three rules, each one a measurement rather than a preference
 
-**1. A rate without a size attached is not a rate.**
-The table above is the venue stating this itself. Every quote carries a 0.14% protocol fee
-*and* a flat `gas_cost_usd` of $1.00, so the all-in cost is a curve: about 10.1% on a $10
-transfer, 1.14% on $100, 0.24% on $1,000, 0.15% on $10,000. Quoting the 0.14% alone is
-quoting a third of the answer. `/convert` returns the fee, the flat gas, and the all-in
+**1. A cost is a curve, and a rate is not.**
+Every quote carries a 0.14% protocol fee *and* a flat `gas_cost_usd` of $1.00, so the
+all-in cost depends on the notional: 1.14% on $100, 0.24% on $1,000, 0.15% on $10,000,
+converging on the proportional component as the flat one becomes noise. Quoting the 0.14%
+alone is quoting part of the answer, and quoting any single percentage without its
+notional is quoting a number that is true at exactly one transfer size.
+
+Done properly the comparison is a strong one: on this pricing a 3% retail bank conversion
+is beaten above roughly $35, and the World Bank's 6.36% global average remittance cost is
+beaten above roughly $16. `/convert` returns the fee, the flat gas, and the all-in
 percentage *for the amount you asked about*, plus the size the rate was measured at.
 
 **2. A rate is directional.**
-`USDC -> MYRT` prices. `MYRT -> USDC` returns `no_liquidity` at every size. Same pair. An
-order book has bids and asks and there is no rule that both sides are populated. A service
-that publishes one mid and lets clients invert it is serving an order that is not there —
-and it will do that most confidently on exactly the thinnest pairs, because those are where
-one side dries up first. `/latest?from=SGD` here returns a 400 explaining why, not an
-inverted number.
+A quote answers a directed question: what this token buys of that token, at this size, in
+this mode. Publishing one mid per pair and letting clients invert it assumes a symmetry the
+quote never asserted, and the client several layers away has no idea an inversion happened.
+This layer stores and serves rates only in the direction it measured, and names the
+direction it has rather than synthesising the one it does not.
 
 **3. The canonical token for a currency is empirical.**
-Sera's worker sketch carries `ISO_TO_TOKEN = { USD: 'USDC', EUR: 'EURC' }` with a comment
-asking someone to confirm whether the euro should be `EURC` or `EUR0`. It cannot be
-confirmed by hand. EUR has **ten** listed tokens — `EUR0, EURAU, EURC, EURE, EURI, EUROP,
-EURQ, EURR, EURS, VEUR` — and not one of them returned a quote against USDC at any size on
-a $1 / $10 / $100 / $1,000 ladder, on 23 or 26 August. A hardcoded `EURC` would have served
-a rate for a pair that cannot fill. Here the canonical token is whichever one prices at the
-smallest size right now, and when none of them do the answer is `null`.
+An ISO code does not map cleanly onto one token — the euro alone has ten symbols listed —
+and a hardcoded map is correct on the day it is typed and drifts silently afterwards.
+Here the canonical token for a currency is resolved by asking: quote each listed candidate
+at a small size and keep whichever prices, recording which one was chosen and when. The
+requests are free and keyless, so the map is accurate as of the run rather than as of the
+commit.
 
 ## Endpoints
 
 ```
 GET /health                      up, table age, and whether it has gone stale
-GET /currencies                  every ISO code, and the token that actually prices it
-GET /latest?from=USD             all outbound rates, nulls included with reasons
+GET /currencies                  every ISO code, and the token measured for it
+GET /latest?from=USD             all measured outbound rates
 GET /convert?from=USD&to=SGD&amount=200
 ```
 
-A currency the book will not price is **HTTP 200 with `rate: null` and a reason**. It is a
-real answer. A currency that does not exist is a 404 and a malformed request is a 400, so a
-caller can tell the three apart. Before the first measurement completes every data endpoint
-returns 503 rather than inventing a table.
+Every answer is machine-readable about its own status. Where the layer has a measured
+rate it returns it with the size it was measured at; where it does not, it returns
+HTTP 200 with `rate: null` and a `reason` field naming which case applies, so a caller
+can branch on it rather than guess. A currency that is not listed at all is a 404 and a
+malformed request is a 400, so those three are distinguishable. Before the first
+measurement completes, every data endpoint returns 503 rather than inventing a table.
+The `reason` enumeration lives in `src/rates.js`.
 
 ```jsonc
 // GET /convert?from=USD&to=SGD&amount=200
@@ -117,25 +119,14 @@ returns 503 rather than inventing a table.
 }
 ```
 
-Those ladder figures are a real measurement of USD to SGD taken on 26 August 2026, and
-they are the reason `/convert` does not serve one number. **The rate is picked from the
-rung that applies to your amount**, not from whichever rung happened to price first: a
-$200 transfer is quoted off the $100 rung, and quoting it off the $10 rung would have
-understated the result by 9.2%.
+Those ladder figures are a real measurement of USD to SGD taken on 26 August 2026 in the
+default gas mode, which is why they vary — see the correction above. **The rate is picked
+from the rung that applies to your amount**, not from whichever rung was measured first,
+and the whole ladder is returned so a caller can see the shape rather than trust it.
 
-An amount below the smallest rung that priced is answered with that rung and flagged
+An amount below the smallest rung measured is answered with that rung and flagged
 `belowSmallestMeasuredSize`. It is an upper bound on what you would receive, never an
-extrapolation — the curve is steepest exactly there, so a guess would be worst precisely
-where being wrong costs the most.
-
-Two failure reasons that look alike and are not:
-
-- `no_liquidity` — nothing will route this pair at any size on the ladder. Go elsewhere.
-- `gas_exceeds_notional` — the pair routes fine, but the guaranteed output was zero at
-  every size tried, because the flat gas ate the trade. **Send more.**
-
-Collapsing the second into the first throws away the only actionable thing you could have
-told the caller.
+extrapolation.
 
 ## Running it
 
@@ -158,54 +149,49 @@ green while it was wrong.** That is worth writing down rather than quietly fixin
 
 The quote client guarded with `if (rp.minOutputAmount == null) throw`. `"0"` is not null,
 so a zero floor passed straight through and the rate came out as `0 / 1 = 0`. Every
-corridor that actually works would have been served to callers as `rate: 0` — worse than
-`null`, because a caller checking for a number gets one and a caller checking truthiness
-silently falls back to something else.
+corridor would have been served to callers as `rate: 0` — worse than `null`, because a
+caller checking for a number gets one and a caller checking truthiness silently falls back
+to something else.
 
 The fixtures had a realistic `minOutputAmount` in them because I wrote them from what I
 expected the API to do. Twenty-two tests passed against my own assumptions. An offline
 suite can only prove that the code agrees with your beliefs about the system; the venue is
 the only thing that can test the beliefs.
 
-Fixed in `measure()`: a non-positive floor is treated as unpriced **at that size**, the
-ladder keeps climbing, and a pair that routes-but-guarantees-nothing at every rung reports
-`gas_exceeds_notional` rather than `no_liquidity`. Regression tests encode the live shape,
-including a fixture that returns HTTP 200 with a zero floor — the old fixture returned a
-400 there, which is precisely why the bug survived.
+Fixed in `measure()`: a non-positive floor is treated as unpriced **at that size** and the
+ladder keeps climbing, and the reason returned distinguishes "the amount was below the
+size where this quote clears its fixed cost — send more" from every other case, because
+only one of those is actionable. Regression tests encode the live shape, including a
+fixture that returns HTTP 200 with a zero floor.
 
 Then a third pass found the real mistake, and it was not in the code. Every measurement
-above had been taken without `gas_mode`, so the API applied its documented default and
-netted the flat cost out of the output. I read the resulting curve as the venue pricing
-small transfers worse, and published that. It is not what the numbers say — see [the
-correction](#the-correction-that-shaped-this-repo) at the top. `measure()` still walks the
-whole ladder, because a caller should be able to *see* that the rate holds across sizes
-rather than trust me about it, but it now measures with `pay_more` by default.
+had been taken without `gas_mode`, so the API applied its documented default and netted
+the flat cost out of the output. I read the resulting curve as a size effect and published
+that — see [the correction](#the-correction-that-shaped-this-repo) at the top. `measure()`
+still walks the whole ladder, because a caller should be able to *see* that the rate holds
+across sizes rather than trust me about it, but it now measures with `pay_more` by default.
 
-**Read the request schema before you interpret the response.** Two rounds of careful
-work on top of one unread parameter produced a confident, reproducible, wrong conclusion,
-and reproducibility made it feel more true rather than less.
+**Two rounds of careful work on top of one unread parameter produced a confident,
+reproducible, wrong conclusion, and reproducibility made it feel more true rather than
+less.**
 
-Reproducing a live run is awkward and the reason is the same wall that makes this layer
-necessary: `api.sera.cx` sends **no** `access-control-allow-origin` header, on any
-response, so a browser on any other origin cannot call it, and a general-purpose sandbox
-usually cannot reach it either. The run behind these numbers was executed from a document
-served by `api.sera.cx` itself, which is the one browser context where same-origin applies.
-From a server this is a non-issue — which is the whole argument for a server-side layer.
+The live run behind these numbers was executed from a document served by `api.sera.cx`
+itself, so that every request was same-origin. The API is built to be called from a
+server, which is exactly what this layer is.
 
 ## Design notes
 
-**`no_liquidity` is data, not an error.** It arrives as an HTTP 400. A client that treats
-every non-200 as a failure cannot tell an empty book from a broken deploy — so it will page
-someone at 3am because a pair is thin, or worse, serve stale numbers through a real outage.
-Here `no_liquidity` is returned as a result and everything else that fails throws.
-`measure()` reports `upstream_error` separately for the same reason.
+**A missing measurement is data, not an error.** The layer returns it as a result with a
+reason, and reserves thrown errors for things that actually went wrong, so a caller can
+tell a case it should handle from a case it should page someone about. `measure()` reports
+`upstream_error` separately for the same reason.
 
 **Integer maths throughout.** Amounts scale with `BigInt`, never `amount * 10 ** decimals`,
 which loses precision above 2^53 and quietly mis-scales 18-decimal tokens.
 
-**Both legs of every market.** `counterpartsOf` matches the hub as base *or* quote. Filtering
-one leg undercounts the book — it is how a first pass at the probe counted 27 markets when
-the honest number was 39, missing `USDT`, which was one of the three that actually priced.
+**Both legs of every market.** `counterpartsOf` matches the hub as base *or* quote.
+Filtering one leg undercounts the book — it is how a first pass counted 27 markets when
+the honest either-leg number was 39, missing `USDT`.
 
 **Nothing reads the clock.** `buildTable` takes `asOf` from the caller, so a table is
 reproducible and the tests are deterministic.
